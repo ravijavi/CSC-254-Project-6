@@ -343,19 +343,6 @@ class Surface {
         }
     }
 
-    // Distance-based Comparator for use in Dijkstra priority queue.
-    // Note: this comparator imposes orderings that are inconsistent with equals.
-    // More specifically: v1.equals(v2) => compare(v1, v2) == 0, but it is
-    // not necessarily the case that compare(v1, v2) == 0 => v1.equals(v2).
-    //
-    private class DistanceComparator implements Comparator<Vertex> {
-        public int compare(Vertex v1, Vertex v2) {
-            if (v1.distToSource < v2.distToSource) return -1;
-            if (v2.distToSource < v1.distToSource) return 1;
-            return 0;
-        }
-    }
-
     // In a purely offline SSSP algorithm we probably wouldn't need an
     // explicit edge class.  Having one makes the graphics a lot more
     // straightforward, though.
@@ -550,33 +537,56 @@ class Surface {
     // *************************
     // Find shortest paths via Dijkstra's algorithm.
     //
+    // Dijkstra's algorithm assumes a priority queue with a log-time decreaseKey
+    // method, which Java's PriorityQueue class doesn't support (and can't easily
+    // support, because it doesn't export references to its internal tree nodes.
+    // The workaround here, due to Jackson Abascal, adds an extra distance field,
+    // "weight," which is equal to v.distToSource when v is first inserted in the
+    // PQ, but keeps its value even when v.distToSoure is reduced.  When we want
+    // to reduce a key, we simply insert the vertex again, and leave the old
+    // reference in place.  The old one has a weight that's worse than
+    // v.distToSource, allowing us to skip over it.
+    //
+    class WeightedVertex implements Comparable<WeightedVertex> {
+        Vertex v;
+        long weight;
+
+        public WeightedVertex(Vertex n) {
+            v = n;
+            weight = v.distToSource;
+        }
+
+        public int compareTo(WeightedVertex other) {
+            if (weight < other.weight) return -1;
+            if (weight == other.weight) return 0;
+            return 1;
+        }
+    }
+
     public void DijkstraSolve() throws Coordinator.KilledException {
-        PriorityQueue<Vertex> pq = new PriorityQueue<Vertex>(n, new DistanceComparator());
-        Vertex v = vertices[0];
-        for (Edge e : v.neighbors) {
-            Vertex o = e.other(v);
-            o.distToSource = e.weight;
-            o.predecessor = e;
-        }
-        for (int i = 1; i < n; i++) {   // don't bother adding source
-            pq.add(vertices[i]);
-        }
+        PriorityQueue<WeightedVertex> pq =
+            new PriorityQueue<WeightedVertex>((n * 12) / 10);
+            // Leave some room for extra umremoved entries.
+        vertices[0].distToSource = 0;
+        // All other vertices still have maximal distToSource, as set by constructor.
+        pq.add(new WeightedVertex(vertices[0]));
         while (!pq.isEmpty()) {
-            v = pq.poll();
-            if (v.distToSource == Long.MAX_VALUE) {
-                // this is a disconnected vertex, as are all that remain
-                break;
+            WeightedVertex wv = pq.poll();
+            Vertex v = wv.v;
+            if (v.predecessor != null) {
+                v.predecessor.select();
             }
-            v.predecessor.select();
+            if (wv.weight != v.distToSource) {
+                // This is a left-over pq entry.
+                continue;
+            }
             for (Edge e : v.neighbors) {
                 Vertex o = e.other(v);
                 long altDist = v.distToSource + e.weight;
-                // relax (o, altDist)
                 if (altDist < o.distToSource) {
-                    pq.remove(o);
                     o.distToSource = altDist;
                     o.predecessor = e;
-                    pq.add(o);
+                    pq.add(new WeightedVertex(o));
                 }
             }
         }
