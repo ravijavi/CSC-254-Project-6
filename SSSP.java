@@ -312,6 +312,8 @@ class Surface {
     private class Vertex {
         public final int xCoord;
         public final int yCoord;
+        public final int id;
+        public final int threadID;
 
         public Vector<Edge> neighbors;
 
@@ -343,6 +345,10 @@ class Surface {
             neighbors = new Vector<Edge>();
             distToSource = Long.MAX_VALUE;
             predecessor = null;
+        }
+        public Vertex(int x, int y, int id) {
+            this(x, y);
+            this.id = id;
         }
     }
 
@@ -489,7 +495,7 @@ class Surface {
             do {
                 x = Math.abs(prn.nextInt()) % maxCoord;
                 y = Math.abs(prn.nextInt()) % maxCoord;
-                v = new Vertex(x, y);
+                v = new Vertex(x, y, i);
             } while (vertexHash.contains(v));
             vertexHash.add(v);
             vertices[i] = v;
@@ -628,6 +634,28 @@ class Surface {
                 buckets.get((int)((altDist / delta) % numBuckets)).add(v);
             }
         }
+        
+        public void relax2(int id, ThreadData data) throws Coordinator.KilledException {
+            Vertex o = e.other(v);
+            long altDist = o.distToSource + e.weight;
+            if (altDist < v.distToSource) {
+                // Yup; better path home
+                v.distToSource = altDist;
+                if (v.id >= data.startThread && v.id < data.startThread + data.numThreads) {
+                    data.buckets.get((int)((v.distToSource / delta) % numBuckets)).remove(v);
+                
+                    if (v.predecessor != null) {
+                        v.predecessor.unselect();
+                    }
+                    v.predecessor = e;
+                    e.select();
+                    data.buckets.get((int)((altDist / delta) % numBuckets)).add(v);
+                } else {
+                    // send request in queue
+                }
+                
+            }
+        }
 
         public Request(Vertex V, Edge E) {
             v = V;  e = E;
@@ -724,83 +752,105 @@ class Surface {
         }
         
         class ThreadData {
+            public int id;
+            public int numThreads;
+            //public int startThread;
+            //public int numThreads;
             public ArrayList<LinkedHashSet<Vertex>> buckets;
             public ConcurrentLinkedQueue<Request> globalRequests;
+            public ArrayList<ConcurrentLinkedQueue<Request>> queueList;
             public int curBucket;
-            public ThreadData() {
+            public ThreadData(int id, ArrayList<ConcurrentLinkedQueue<Request>> queueList, int numThreads) {
+                this.id = id;
+                this.numThreads = numThreads;
                 this.buckets = new ArrayList<LinkedHashSet<Vertex>>(numThreads);
                 for (int i = 0; i < numBuckets; ++i) {
                     buckets.add(new LinkedHashSet<Vertex>());
                 }
                 this.globalRequests = new ConcurrentLinkedQueue<Request>();
+                this.queueList = queueList;
+                this.queueList.put(id, this.globalRequests);
             }
         }
         
         class Worker implements Runnable {
             int id;
-            int startThread;
-            int numThreads;
+            //int startThread;
+            //int numThreads;
             ThreadData data;
             public Worker(int id, int numVertices, int numThreads, ThreadData data) {
                 this.id = id;
-                this.startThread = numVertices * id / numThreads;
-                this.numThreads = numVertices * (id+1) / numThreads - this.startThread;
+                //this.startThread = numVertices * id / numThreads;
+                //this.numThreads = numVertices * (id+1) / numThreads - this.startThread;
                 this.data = data;
+                //this.data.startThread = this.startThread;
+                //this.data.numThreads = this.numThreads;
             }
             
             public void run() {
-                // first run delta step on that bucket
+                // do light relaxations
                 
-                LinkedList<Vertex> removed = new LinkedList<Vertex>();
-                LinkedList<Request> requests;
-                while (buckets.get(i).size() > 0) {
-                    requests = findRequests(data.buckets.get(i), true);  // light relaxations
-                    // Move all vertices from bucket i to removed list.
-                    removed.addAll(data.buckets.get(i));
-                    data.buckets.set(i, new LinkedHashSet<Vertex>());
-                    for (Request req : requests) {
-                        req.relax(); // have to use a modified request class instead
-                    }
-                }
-                
-                
-                
-                while(!allThreadsWaiting) {
-                    // if queue sent us some vertices, add them to the corresponding bucket
-                    // if our current bucket got some vertices added to it, then run delta step on those
-                    if (data.globalRequests.size() > 0) {
-                        updateThreadStatus(id, false);
-                        // add/move vertices to different buckets if necessary
-                        
-                        // ...
-                        
-                        if (false/* current bucket had some vertices added to it */) {
-                            // run delta stepping
+                int i = 0;
+                for (;;) {
+                    LinkedList<Vertex> removed = new LinkedList<Vertex>();
+                    LinkedList<Request> requests;
+                    while (data.buckets.get(i).size() > 0) {    //not guaranteed this will be the end of the data set
+                        requests = findRequests(data.buckets.get(i), true);  // light relaxations
+                        // Move all vertices from bucket i to removed list.
+                        removed.addAll(data.buckets.get(i));
+                        data.buckets.set(i, new LinkedHashSet<Vertex>());
+                        for (Request req : requests) {
+                            data.queueList.get(req.v.id % numThreads).push(req);
                         }
-                        updateThreadStatus(id, true);
-                    }
+                        
+                        try {
+                            barrier.await();
+                        } catch (InterruptedException ex) {
+                            return;
+                        } catch (BrokenBarrierException ex) {
+                            return;
+                        }
                     
-                    // otherwise, sleep
-                    try {
-                        Thread.sleep(50);
-                    } catch(InterruptedException e) {};
-                    // do stuff
-                    // check queue
+                        // relax the requests
+                        while(!globalRequests.isEmpty()) {
+                            Request req = globalRequests.pop();
+                            req.relax2();
+                        }
+                        
+                        try {
+                            barrier.await();
+                        } catch (InterruptedException ex) {
+                            return;
+                        } catch (BrokenBarrierException ex) {
+                            return;
+                        }
+                    }
+
+                    
+                    // Now bucket i is empty.
+                    requests = findRequests(removed, false);    // heavy relaxations
+                    for (Request req : requests) {
+                        if (req.v.id % numThreads == 0) {
+                            // do it ourselves
+                        } else {
+                            // add to queue
+                        }
+                        req.relax();
+                    }
+                    // Find next nonempty bucket.
+                    int j = i;
+                    do {
+                        j = (j + 1) % numBuckets;
+                    } while (j != i && data.buckets.get(j).size() == 0);
+                    if (i == j) {
+                        // Cycled all the way around; we're done
+                        break;  // for (;;) loop
+                    }
+                    i = j;  //TODO: should be managed by a barrier, should only be ran once by a runnable
                 }
                 
-                try {
-                    barrier.await();
-                } catch (InterruptedException e) {
-                    return;
-                } catch (BrokenBarrierException e) {
-                    return;
-                }
             }
-            
-            public void processDeltaStep(int index) {
-                // do delta stepping in here
-            }
-            
+
             
         }
         
@@ -815,9 +865,10 @@ class Surface {
             waitingThreads = new boolean[numThreads];
             
             // initialize everything
+            ArrayList<ConcurrentLinkedQueue<Request>> queues = new ArrayList<ConcurrentLinkedQueue<Request>>(numThreads);
             ThreadData[] threadData = new ThreadData[numThreads];
             for (int i = 0; i < numThreads; i++) {
-                threadData[i] = new ThreadData();
+                threadData[i] = new ThreadData(i, queues, numThreads);
             }
             
             // initialize the buckets, add the starting vertex to the bucket of the thread assigned to it
