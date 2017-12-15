@@ -19,8 +19,7 @@ import java.awt.event.*;
 import java.io.*;
 import javax.swing.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.*;
 
 public class SSSP {
     private static int n = 50;              // default number of vertices
@@ -787,21 +786,60 @@ class Surface {
         
         private int numVertices;
         private int numThreads;
+        private int numBuckets;
+        private int degree;
+        private int delta;
+        
+        private boolean[] waitingThreads;
+        private boolean allThreadsWaiting;
         
         final CyclicBarrier barrier;
+        
+        public void updateThreadStatus(int threadID, boolean status) {
+            waitingThreads[threadID] = status;
+            if (status) {
+                for (int i = 0; i < numThreads; i++) {
+                    if (!waitingThreads[i]) return;
+                }
+                allThreadsWaiting = true;
+            }
+        }
+        
+        class ThreadData {
+            public ArrayList<LinkedHashSet<Vertex>> buckets;
+            public ConcurrentLinkedQueue<Request> globalRequests;
+            public int curBucket;
+            public ThreadData() {
+                this.buckets = new ArrayList<LinkedHashSet<Vertex>>(numThreads);
+                for (int i = 0; i < numBuckets; ++i) {
+                    buckets.add(new LinkedHashSet<Vertex>());
+                }
+                this.globalRequests = new ConcurrentLinkedQueue<Request>();
+            }
+        }
         
         class Worker implements Runnable {
             int id;
             int startThread;
             int numThreads;
-            public Worker(int id, int numVertices, int numThreads) {
+            ThreadData data;
+            public Worker(int id, int numVertices, int numThreads, ThreadData data) {
                 this.id = id;
                 this.startThread = numVertices * id / numThreads;
                 this.numThreads = numVertices * (id+1) / numThreads - this.startThread;
+                this.data = data;
             }
             
             public void run() {
-                processDeltaStep(int bucketIndex);
+                processDeltaStep(5);
+                
+                while(!allThreadsWaiting) {
+                    try {
+                        Thread.sleep(50);
+                    } catch(InterruptedException e) {};
+                    // do stuff
+                    // check queue
+                }
                 
                 try {
                     barrier.await();
@@ -819,21 +857,39 @@ class Surface {
             
         }
         
-        public Solver() {
+        public DeltaStep(int numVertices, int numThreads) {
+            this.numVertices = numVertices;
+            this.numThreads = numThreads;
+            this.numBuckets = 2 * degree;
+            this.delta = maxCoord / degree;
+            
+            // create waitingThreads array
+            // TODO: concurrency issues with accessing this array?  make it synchronized?
+            waitingThreads = new boolean[numThreads];
+            
             // initialize everything
-            
-            List<Thread> threads = new ArrayList<Thread>(numThreads);
+            ThreadData[] threadData = new ThreadData[numThreads];
             for (int i = 0; i < numThreads; i++) {
-                Thread thread = new Thread(new Worker(i, numVertices, numThreads));
-                threads.add(thread);
+                threadData[i] = new ThreadData();
             }
             
-            // start the threads and iterate until delta stepping is finished
+            // initialize the buckets, add the starting vertex to the bucket of the thread assigned to it
+            int curBucket = 0;
+            threadData[0].buckets.get(0).add(vertices[0]);
+            
             while(true) { // TODO: delta stepping not finished
-                // choose a bucket
-                // have all the threads run on that bucket
-                // use a barrier
+                allThreadsWaiting = false;
+                
+                
+                
+                // create the threads
+                // TODO: don't make new threads every iteration
+                ArrayList<Thread> threads = new ArrayList<Thread>(numThreads);
+                for (int i = 0; i < numThreads; i++) {
+                    new Thread(new Worker(i, numVertices, numThreads, threadData[i])).start();
+                }
             }
+            
         }
     
     }
