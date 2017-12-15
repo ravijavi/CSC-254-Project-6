@@ -663,6 +663,10 @@ class Surface {
         public Request(Vertex V, Edge E) {
             v = V;  e = E;
         }
+        
+        public String toString() {
+            return "(" + e.other(v).id + " - " + v.id + " : " + e.weight + ")"; 
+        }
     }
 
     // Return list of requests whose connecting edge weight is <= or > than delta.
@@ -810,7 +814,7 @@ class Surface {
                         data.buckets.set(i, new LinkedHashSet<Vertex>());
                         //System.out.println("request size: " + requests.size());
                         for (Request req : requests) {
-                            //System.out.println("request: " + req);
+                            //System.out.println("request (light): " + req);
                             data.queueList.get(req.v.id % numThreads).add(req);
                         }
 
@@ -933,10 +937,10 @@ class Surface {
             barrierFindNextBucket = new CyclicBarrier(numThreads, new Runnable() {
                 private DeltaStep caller;
                 public void run() {
-                    System.out.println("CHECKING ALL BUCKETS");
-                    for (LinkedHashSet<Vertex> b : threadData[0].buckets) {
-                        System.out.println(">bucket size: " + b.size());
-                    }
+                    //System.out.println("CHECKING ALL BUCKETS");
+                    //for (LinkedHashSet<Vertex> b : threadData[0].buckets) {
+                    //    System.out.println(">bucket size: " + b.size());
+                    //}
                     
                     // Find next nonempty bucket.
                     int j = caller.curBucket;
@@ -946,6 +950,10 @@ class Surface {
                         for (ThreadData d : threadData) {
                             if (d.buckets.get(j).size() != 0) {
                                 checker = false;
+                                if (j == caller.curBucket) {
+                                    isDone = false;
+                                    return;
+                                }
                                 break;
                             }
                         }
@@ -975,7 +983,7 @@ class Surface {
             }
             
         
-            System.out.println("waiting at final barrier");
+            //System.out.println("waiting at final barrier");
             for (Thread t : threads) {
                 try {
                     t.join();
@@ -983,7 +991,7 @@ class Surface {
             }
             System.out.println("finished!");
             long t2 = System.nanoTime();
-            System.out.println("nanotime: " + (t2-t1)/1000/1000);
+            //System.out.println("nanotime: " + (t2-t1));
         }
     
     }
@@ -1120,7 +1128,7 @@ class UI extends JPanel {
 
     public void updateTime() {
         Date d = new Date();
-        elapsedTime += (d.getTime() - startTime);
+        elapsedTime += (d.getTime() - startTime);                        
         time.setText(String.format("time: %d.%03d", elapsedTime/1000,
                                                     elapsedTime%1000));
     }
