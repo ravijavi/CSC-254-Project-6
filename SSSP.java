@@ -19,7 +19,7 @@ import java.awt.event.*;
 import java.io.*;
 import javax.swing.*;
 import java.util.*;
-import java.lang.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class SSSP {
     private static int n = 50;              // default number of vertices
@@ -692,6 +692,70 @@ class Surface {
 
     // End of Delta stepping.
     // *************************
+    
+    
+    private ArrayList<ConcurrentLinkedQueue<Request>> threadQueues;
+    
+    public void initThreadQueues(int numThreads) {
+        threadQueues = new ArrayList<ConcurrentLinkedQueue<Request>>(numThreads);
+    }
+    
+    public void initThreadQueuesAndThreads(int numVertices, int numThreads) {
+        initThreadQueues(numThreads);
+        for (int i = 0; i < numThreads; i++) {
+            DeltaThread t =new DeltaThread(i, numVertices, numThreads);
+        }
+    }
+    
+    
+    class DeltaThread {
+
+        private int id;
+        private int startVertex;
+        private int numVertices;
+        private java.util.List<ArrayList<LinkedHashSet<Vertex>>> buckets;
+        private ConcurrentLinkedQueue<Request> requests;
+        
+        
+        
+    
+        /*
+         * Constructor
+         */
+        public DeltaThread(int id, int numVertices, int numThreads) {
+            this.id = id;
+            this.startVertex = numVertices * id / numThreads;
+            this.numVertices = (numVertices * (id+1) / numThreads) - this.startVertex;
+        
+            // set up the queue and add it in
+            this.requests = new ConcurrentLinkedQueue<Request>();
+            threadQueues.set(id, this.requests);
+        }
+
+    }
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
     // Constructor
     //
