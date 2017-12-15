@@ -20,6 +20,7 @@ import java.io.*;
 import javax.swing.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CyclicBarrier;
 
 public class SSSP {
     private static int n = 50;              // default number of vertices
@@ -703,7 +704,7 @@ class Surface {
     public void initThreadQueuesAndThreads(int numVertices, int numThreads) {
         initThreadQueues(numThreads);
         for (int i = 0; i < numThreads; i++) {
-            DeltaThread t =new DeltaThread(i, numVertices, numThreads);
+            DeltaThread t = new DeltaThread(i, numVertices, numThreads, threadQueues);
         }
     }
     
@@ -713,8 +714,9 @@ class Surface {
         private int id;
         private int startVertex;
         private int numVertices;
-        private java.util.List<ArrayList<LinkedHashSet<Vertex>>> buckets;
-        private ConcurrentLinkedQueue<Request> requests;
+        private ArrayList<LinkedHashSet<Vertex>> buckets;
+        private ConcurrentLinkedQueue<Request> globalRequests;
+        private ArrayList<ConcurrentLinkedQueue<Request>> threadQueues;
         
         
         
@@ -722,19 +724,119 @@ class Surface {
         /*
          * Constructor
          */
-        public DeltaThread(int id, int numVertices, int numThreads) {
+        public DeltaThread(int id, int numVertices, int numThreads, ArrayList<ConcurrentLinkedQueue<Request>> threadQueues) {
             this.id = id;
             this.startVertex = numVertices * id / numThreads;
             this.numVertices = (numVertices * (id+1) / numThreads) - this.startVertex;
         
             // set up the queue and add it in
-            this.requests = new ConcurrentLinkedQueue<Request>();
-            threadQueues.set(id, this.requests);
+            this.globalRequests = new ConcurrentLinkedQueue<Request>();
+            this.threadQueues = threadQueues;
+            if (threadQueues == null) {
+                threadQueues = new ArrayList<ConcurrentLinkedQueue<Request>>(numThreads);
+            }
+            threadQueues.set(id, this.globalRequests);
+        }
+        
+        
+        public void deltaSolve() throws Coordinator.KilledException {
+            numBuckets = 2 * degree;
+            delta = maxCoord / degree;
+            // All buckets, together, cover a range of 2 * maxCoord,
+            // which is larger than the weight of any edge, so a relaxation
+            // will never wrap all the way around the array.
+            this.buckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
+            for (int i = 0; i < numBuckets; ++i) {
+                buckets.add(new LinkedHashSet<Vertex>());
+            }
+            //buckets.get(0).add(vertices[0]);
+            int i = 0;
+            for (;;) {
+                LinkedList<Vertex> removed = new LinkedList<Vertex>();
+                LinkedList<Request> requests;
+                while (buckets.get(i).size() > 0) {
+                    requests = findRequests(buckets.get(i), true);  // light relaxations
+                    // Move all vertices from bucket i to removed list.
+                    removed.addAll(buckets.get(i));
+                    buckets.set(i, new LinkedHashSet<Vertex>());
+                    for (Request req : requests) {
+                        req.relax();
+                    }
+                }
+                // Now bucket i is empty.
+                requests = findRequests(removed, false);    // heavy relaxations
+                for (Request req : requests) {
+                    req.relax();
+                }
+                // Find next nonempty bucket.
+                int j = i;
+                do {
+                    j = (j + 1) % numBuckets;
+                } while (j != i && buckets.get(j).size() == 0);
+                if (i == j) {
+                    // Cycled all the way around; we're done
+                    break;  // for (;;) loop
+                }
+                i = j;
+            }
         }
 
     }
     
+    class DeltaStep {
+        
+        private int numVertices;
+        private int numThreads;
+        
+        final CyclicBarrier barrier;
+        
+        class Worker implements Runnable {
+            int id;
+            int startThread;
+            int numThreads;
+            public Worker(int id, int numVertices, int numThreads) {
+                this.id = id;
+                this.startThread = numVertices * id / numThreads;
+                this.numThreads = numVertices * (id+1) / numThreads - this.startThread;
+            }
+            
+            public void run() {
+                processDeltaStep(int bucketIndex);
+                
+                try {
+                    barrier.await();
+                } catch (InterruptedException e) {
+                    return;
+                } catch (BrokenBarrierException e) {
+                    return;
+                }
+            }
+            
+            public void processDeltaStep(int index) {
+                // do delta stepping in here
+            }
+            
+            
+        }
+        
+        public Solver() {
+            // initialize everything
+            
+            List<Thread> threads = new ArrayList<Thread>(numThreads);
+            for (int i = 0; i < numThreads; i++) {
+                Thread thread = new Thread(new Worker(i, numVertices, numThreads));
+                threads.add(thread);
+            }
+            
+            // start the threads and iterate until delta stepping is finished
+            while(true) { // TODO: delta stepping not finished
+                // choose a bucket
+                // have all the threads run on that bucket
+                // use a barrier
+            }
+        }
     
+    }
     
     
     
