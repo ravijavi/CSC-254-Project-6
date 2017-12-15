@@ -214,7 +214,9 @@ public class SSSP {
                 if (numThreads == 0) {
                     s.DijkstraSolve();
                 } else {
-                    s.DeltaSolve();
+                    System.out.println("line 217?");
+                    //s.DeltaSolve();
+                    s.DeltaParallel(numThreads);
                 }
             } catch(Coordinator.KilledException e) { }
             long endTime = new Date().getTime();
@@ -254,6 +256,7 @@ class Worker extends Thread {
             if (dijkstra) {
                 s.DijkstraSolve();
             } else {
+                System.out.println("line 257?  USE DEFAULT HERE CURRENTLY");
                 s.DeltaSolve();
             }
             c.unregister();
@@ -693,93 +696,8 @@ class Surface {
     // End of Delta stepping.
     // *************************
     
-    
-    private ArrayList<ConcurrentLinkedQueue<Request>> threadQueues;
-    
-    public void initThreadQueues(int numThreads) {
-        threadQueues = new ArrayList<ConcurrentLinkedQueue<Request>>(numThreads);
-    }
-    
-    public void initThreadQueuesAndThreads(int numVertices, int numThreads) {
-        initThreadQueues(numThreads);
-        for (int i = 0; i < numThreads; i++) {
-            DeltaThread t = new DeltaThread(i, numVertices, numThreads, threadQueues);
-        }
-    }
-    
-    
-    class DeltaThread {
-
-        private int id;
-        private int startVertex;
-        private int numVertices;
-        private ArrayList<LinkedHashSet<Vertex>> buckets;
-        private ConcurrentLinkedQueue<Request> globalRequests;
-        private ArrayList<ConcurrentLinkedQueue<Request>> threadQueues;
-        
-        
-        
-    
-        /*
-         * Constructor
-         */
-        public DeltaThread(int id, int numVertices, int numThreads, ArrayList<ConcurrentLinkedQueue<Request>> threadQueues) {
-            this.id = id;
-            this.startVertex = numVertices * id / numThreads;
-            this.numVertices = (numVertices * (id+1) / numThreads) - this.startVertex;
-        
-            // set up the queue and add it in
-            this.globalRequests = new ConcurrentLinkedQueue<Request>();
-            this.threadQueues = threadQueues;
-            if (threadQueues == null) {
-                threadQueues = new ArrayList<ConcurrentLinkedQueue<Request>>(numThreads);
-            }
-            threadQueues.set(id, this.globalRequests);
-        }
-        
-        
-        public void deltaSolve() throws Coordinator.KilledException {
-            numBuckets = 2 * degree;
-            delta = maxCoord / degree;
-            // All buckets, together, cover a range of 2 * maxCoord,
-            // which is larger than the weight of any edge, so a relaxation
-            // will never wrap all the way around the array.
-            this.buckets = new ArrayList<LinkedHashSet<Vertex>>(numBuckets);
-            for (int i = 0; i < numBuckets; ++i) {
-                buckets.add(new LinkedHashSet<Vertex>());
-            }
-            //buckets.get(0).add(vertices[0]);
-            int i = 0;
-            for (;;) {
-                LinkedList<Vertex> removed = new LinkedList<Vertex>();
-                LinkedList<Request> requests;
-                while (buckets.get(i).size() > 0) {
-                    requests = findRequests(buckets.get(i), true);  // light relaxations
-                    // Move all vertices from bucket i to removed list.
-                    removed.addAll(buckets.get(i));
-                    buckets.set(i, new LinkedHashSet<Vertex>());
-                    for (Request req : requests) {
-                        req.relax();
-                    }
-                }
-                // Now bucket i is empty.
-                requests = findRequests(removed, false);    // heavy relaxations
-                for (Request req : requests) {
-                    req.relax();
-                }
-                // Find next nonempty bucket.
-                int j = i;
-                do {
-                    j = (j + 1) % numBuckets;
-                } while (j != i && buckets.get(j).size() == 0);
-                if (i == j) {
-                    // Cycled all the way around; we're done
-                    break;  // for (;;) loop
-                }
-                i = j;
-            }
-        }
-
+    void DeltaParallel(int numThreads) {
+        new DeltaStep(numThreads);
     }
     
     class DeltaStep {
@@ -793,7 +711,7 @@ class Surface {
         private boolean[] waitingThreads;
         private boolean allThreadsWaiting;
         
-        final CyclicBarrier barrier;
+        CyclicBarrier barrier;
         
         public void updateThreadStatus(int threadID, boolean status) {
             waitingThreads[threadID] = status;
@@ -831,9 +749,38 @@ class Surface {
             }
             
             public void run() {
-                processDeltaStep(5);
+                // first run delta step on that bucket
+                
+                LinkedList<Vertex> removed = new LinkedList<Vertex>();
+                LinkedList<Request> requests;
+                while (buckets.get(i).size() > 0) {
+                    requests = findRequests(data.buckets.get(i), true);  // light relaxations
+                    // Move all vertices from bucket i to removed list.
+                    removed.addAll(data.buckets.get(i));
+                    data.buckets.set(i, new LinkedHashSet<Vertex>());
+                    for (Request req : requests) {
+                        req.relax(); // have to use a modified request class instead
+                    }
+                }
+                
+                
                 
                 while(!allThreadsWaiting) {
+                    // if queue sent us some vertices, add them to the corresponding bucket
+                    // if our current bucket got some vertices added to it, then run delta step on those
+                    if (data.globalRequests.size() > 0) {
+                        updateThreadStatus(id, false);
+                        // add/move vertices to different buckets if necessary
+                        
+                        // ...
+                        
+                        if (false/* current bucket had some vertices added to it */) {
+                            // run delta stepping
+                        }
+                        updateThreadStatus(id, true);
+                    }
+                    
+                    // otherwise, sleep
                     try {
                         Thread.sleep(50);
                     } catch(InterruptedException e) {};
@@ -857,8 +804,8 @@ class Surface {
             
         }
         
-        public DeltaStep(int numVertices, int numThreads) {
-            this.numVertices = numVertices;
+        public DeltaStep(int numThreads) {
+            this.numVertices = vertices.length;
             this.numThreads = numThreads;
             this.numBuckets = 2 * degree;
             this.delta = maxCoord / degree;
@@ -880,39 +827,36 @@ class Surface {
             while(true) { // TODO: delta stepping not finished
                 allThreadsWaiting = false;
                 
-                
-                
                 // create the threads
-                // TODO: don't make new threads every iteration
+                // TODO: don't make new threads every iteration?
                 ArrayList<Thread> threads = new ArrayList<Thread>(numThreads);
+                barrier = new CyclicBarrier(numThreads);
                 for (int i = 0; i < numThreads; i++) {
                     new Thread(new Worker(i, numVertices, numThreads, threadData[i])).start();
                 }
+                
+                // Find next nonempty bucket.
+                int j = curBucket;
+                do {
+                    j = (j + 1) % numBuckets;
+                    for (ThreadData d : threadData) {
+                        if (d.buckets.get(j).size() != 0) {
+                            break;
+                        }
+                    }
+                } while (j != curBucket/* && buckets.get(j).size() == 0*/);
+                if (curBucket == j) {
+                    // Cycled all the way around; we're done
+                    break; // terminate the outer loop
+                }
+                curBucket = j;
             }
             
         }
     
     }
     
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
     
 
     // Constructor
