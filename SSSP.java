@@ -30,6 +30,8 @@ public class SSSP {
     private static long sd = 0;             // default random number seed
     private static int numThreads = 0;      // zero means use Dijkstra's alg;
                                             // positive means use Delta stepping
+                                            
+    private static boolean verbose = false;
 
     private static final int TIMING_ONLY    = 0;
     private static final int PRINT_EVENTS   = 1;
@@ -145,6 +147,8 @@ public class SSSP {
             } else if (args[i].equals("-v")) {
                 System.err.print(help);
                 System.exit(0);
+            } else if (args[i].equals("-V")) {
+                verbose = true;
             } else {
                 System.err.printf("Unexpected argument: %s\n", args[i]);
                 System.err.print(help);
@@ -214,7 +218,6 @@ public class SSSP {
                 if (numThreads == 0) {
                     s.DijkstraSolve();
                 } else {
-                    System.out.println("line 217?");
                     //s.DeltaSolve();
                     s.DeltaParallel(numThreads);
                 }
@@ -222,6 +225,11 @@ public class SSSP {
             long endTime = new Date().getTime();
             System.out.printf("elapsed time: %.3f seconds\n",
                               (double) (endTime-startTime)/1000);
+            if (verbose) {
+                for (Surface.Vertex v : s.vertices) {
+                    System.out.println(v.id + " :\t" + v.distToSource);
+                }
+            }
         }
     }
 }
@@ -256,8 +264,9 @@ class Worker extends Thread {
             if (dijkstra) {
                 s.DijkstraSolve();
             } else {
-                System.out.println("line 257?  USE DEFAULT HERE CURRENTLY");
-                s.DeltaSolve();
+                System.out.println("line 267?  USE DEFAULT HERE CURRENTLY");
+                //s.DeltaSolve();
+                s.DeltaParallel(1);
             }
             c.unregister();
         } catch(Coordinator.KilledException e) { }
@@ -298,7 +307,7 @@ class Surface {
         // Not needed at present, but will need to be passed to any
         // newly created workers.
     private final int n;  // number of vertices
-    private final Vertex vertices[];
+    public final Vertex vertices[];
         // Main array of vertices, used for partitioning and rendering.
     private final HashSet<Vertex> vertexHash;
         // Used to ensure that we never have two vertices directly on top of
@@ -309,11 +318,10 @@ class Surface {
     private int degree;         // desired average node degree
     private final Random prn;   // pseudo-random number generator
 
-    private class Vertex {
+    public class Vertex {
         public final int xCoord;
         public final int yCoord;
         public final int id;
-        public final int threadID;
 
         public Vector<Edge> neighbors;
 
@@ -341,13 +349,13 @@ class Surface {
         // Constructor
         //
         public Vertex(int x, int y) {
+            this(x, y, -1);
+        }
+        public Vertex(int x, int y, int id) {
             xCoord = x;  yCoord = y;
             neighbors = new Vector<Edge>();
             distToSource = Long.MAX_VALUE;
             predecessor = null;
-        }
-        public Vertex(int x, int y, int id) {
-            this(x, y);
             this.id = id;
         }
     }
@@ -635,25 +643,20 @@ class Surface {
             }
         }
         
-        public void relax2(int id, ThreadData data) throws Coordinator.KilledException {
+        public void relax2(int id, DeltaStep.ThreadData data) throws Coordinator.KilledException {
             Vertex o = e.other(v);
             long altDist = o.distToSource + e.weight;
             if (altDist < v.distToSource) {
-                // Yup; better path home
+                // Yup; better path home.
+                data.buckets.get((int)((v.distToSource / delta) % numBuckets)).remove(v);
                 v.distToSource = altDist;
-                if (v.id >= data.startThread && v.id < data.startThread + data.numThreads) {
-                    data.buckets.get((int)((v.distToSource / delta) % numBuckets)).remove(v);
-                
-                    if (v.predecessor != null) {
-                        v.predecessor.unselect();
-                    }
-                    v.predecessor = e;
-                    e.select();
-                    data.buckets.get((int)((altDist / delta) % numBuckets)).add(v);
-                } else {
-                    // send request in queue
+                if (v.predecessor != null) {
+                    v.predecessor.unselect();
                 }
-                
+                v.predecessor = e;
+                e.select();
+                //System.out.println("relaxing a vertex, adding to bucket " + ((altDist / delta) % numBuckets));
+                data.buckets.get((int)((altDist / delta) % numBuckets)).add(v);
             }
         }
 
@@ -732,14 +735,18 @@ class Surface {
         
         private int numVertices;
         private int numThreads;
-        private int numBuckets;
-        private int degree;
-        private int delta;
+        //private int degree;
+        //public int delta = 0;
+        
+        public int curBucket;
         
         private boolean[] waitingThreads;
         private boolean allThreadsWaiting;
+        private boolean isDone = false;
         
         CyclicBarrier barrier;
+        CyclicBarrier barrierFindNextBucket;
+        CyclicBarrier barrierFinal;
         
         public void updateThreadStatus(int threadID, boolean status) {
             waitingThreads[threadID] = status;
@@ -769,7 +776,7 @@ class Surface {
                 }
                 this.globalRequests = new ConcurrentLinkedQueue<Request>();
                 this.queueList = queueList;
-                this.queueList.put(id, this.globalRequests);
+                this.queueList.add(id, this.globalRequests);
             }
         }
         
@@ -792,62 +799,105 @@ class Surface {
                 
                 int i = 0;
                 for (;;) {
+                    i = curBucket;
+                    
                     LinkedList<Vertex> removed = new LinkedList<Vertex>();
                     LinkedList<Request> requests;
-                    while (data.buckets.get(i).size() > 0) {    //not guaranteed this will be the end of the data set
+                    while (!allThreadsWaiting) {
                         requests = findRequests(data.buckets.get(i), true);  // light relaxations
                         // Move all vertices from bucket i to removed list.
                         removed.addAll(data.buckets.get(i));
                         data.buckets.set(i, new LinkedHashSet<Vertex>());
+                        //System.out.println("request size: " + requests.size());
                         for (Request req : requests) {
-                            data.queueList.get(req.v.id % numThreads).push(req);
+                            //System.out.println("request: " + req);
+                            data.queueList.get(req.v.id % numThreads).add(req);
                         }
-                        
-                        try {
-                            barrier.await();
-                        } catch (InterruptedException ex) {
-                            return;
-                        } catch (BrokenBarrierException ex) {
-                            return;
-                        }
-                    
+
                         // relax the requests
-                        while(!globalRequests.isEmpty()) {
-                            Request req = globalRequests.pop();
-                            req.relax2();
+                        while(!data.globalRequests.isEmpty()) {
+                            waitingThreads[id] = false;
+                            allThreadsWaiting = false;
+                            Request req = data.globalRequests.poll();
+                            try {
+                                req.relax2(id, data);
+                            } catch (Coordinator.KilledException e) {
+                                System.out.println("warning: killed exception thrown");
+                            }
                         }
+                        waitingThreads[id] = true;
+                        boolean tmp = true;
+                        for (int k = 0; k < numThreads; k++) {
+                            if (!waitingThreads[k]) { tmp = false; break; }//does it have to with the casting of ints? No, bc that would throw an error
+                        }
+                        allThreadsWaiting = tmp;
                         
+    
+                    }
+                    //System.out.println("foo");
+                    try {
+                        barrier.await();
+                    } catch (InterruptedException ex) {
+                        return;
+                    } catch (BrokenBarrierException ex) {
+                        return;
+                    }
+                    // write to the queues
+                    waitingThreads[id] = false;
+                    allThreadsWaiting = false;
+                    
+                    // Now bucket i is                    System.out.println("new bucket: " + j); empty.
+                    requests = findRequests(removed, false);    // heavy relaxations
+                    for (Request req : requests) {
+                        // figure out which thread oversees that vertex and add it to that thread's queue
+                        data.queueList.get(req.v.id % numThreads).add(req);
+
+                    }
+                    
+                    try {
+                        barrier.await();
+                    } catch (InterruptedException ex) {
+                        return;
+                    } catch (BrokenBarrierException ex) {
+                        return;
+                    }
+                    //System.out.println("reading from queue");
+                    // read from the queues
+                    while(!data.globalRequests.isEmpty()) {
+                        Request req = data.globalRequests.poll();
                         try {
-                            barrier.await();
-                        } catch (InterruptedException ex) {
-                            return;
-                        } catch (BrokenBarrierException ex) {
-                            return;
+                            req.relax2(id, data);
+                        } catch (Coordinator.KilledException e) {
+                            System.out.println("warning: killed exception thrown");
                         }
                     }
 
+                    /*
+                    for (LinkedHashSet<Vertex> b : data.buckets) {
+                        System.out.println("bucket size: " + b.size());
+                    }
+                    */
                     
-                    // Now bucket i is empty.
-                    requests = findRequests(removed, false);    // heavy relaxations
-                    for (Request req : requests) {
-                        if (req.v.id % numThreads == 0) {
-                            // do it ourselves
-                        } else {
-                            // add to queue
-                        }
-                        req.relax();
+                    try {
+                        barrierFindNextBucket.await();
+                    } catch (InterruptedException ex) {
+                        return;
+                    } catch (BrokenBarrierException ex) {
+                        return;
                     }
-                    // Find next nonempty bucket.
-                    int j = i;
-                    do {
-                        j = (j + 1) % numBuckets;
-                    } while (j != i && data.buckets.get(j).size() == 0);
-                    if (i == j) {
-                        // Cycled all the way around; we're done
-                        break;  // for (;;) loop
+                    //System.out.println("waiting for done");
+                    //                        System.out.println("is done");
+
+                    if (isDone) {
+                        //System.out.println("thread " + id + " finished");
+                        break;
                     }
-                    i = j;  //TODO: should be managed by a barrier, should only be ran once by a runnable
+                    
                 }
+                
+                System.out.println("thread " + id + " finished");
+                
+
                 
             }
 
@@ -857,8 +907,10 @@ class Surface {
         public DeltaStep(int numThreads) {
             this.numVertices = vertices.length;
             this.numThreads = numThreads;
-            this.numBuckets = 2 * degree;
-            this.delta = maxCoord / degree;
+            numBuckets = 2 * degree;
+            delta = maxCoord / degree;
+            this.curBucket = 0;
+            long t1 = System.nanoTime();
             
             // create waitingThreads array
             // TODO: concurrency issues with accessing this array?  make it synchronized?
@@ -872,37 +924,66 @@ class Surface {
             }
             
             // initialize the buckets, add the starting vertex to the bucket of the thread assigned to it
-            int curBucket = 0;
+            curBucket = 0;
             threadData[0].buckets.get(0).add(vertices[0]);
             
-            while(true) { // TODO: delta stepping not finished
-                allThreadsWaiting = false;
-                
-                // create the threads
-                // TODO: don't make new threads every iteration?
-                ArrayList<Thread> threads = new ArrayList<Thread>(numThreads);
-                barrier = new CyclicBarrier(numThreads);
-                for (int i = 0; i < numThreads; i++) {
-                    new Thread(new Worker(i, numVertices, numThreads, threadData[i])).start();
-                }
-                
-                // Find next nonempty bucket.
-                int j = curBucket;
-                do {
-                    j = (j + 1) % numBuckets;
-                    for (ThreadData d : threadData) {
-                        if (d.buckets.get(j).size() != 0) {
-                            break;
-                        }
+            // create the threads
+            barrier = new CyclicBarrier(numThreads);
+            barrierFinal = new CyclicBarrier(numThreads+1);                            
+            barrierFindNextBucket = new CyclicBarrier(numThreads, new Runnable() {
+                private DeltaStep caller;
+                public void run() {
+                    System.out.println("CHECKING ALL BUCKETS");
+                    for (LinkedHashSet<Vertex> b : threadData[0].buckets) {
+                        System.out.println(">bucket size: " + b.size());
                     }
-                } while (j != curBucket/* && buckets.get(j).size() == 0*/);
-                if (curBucket == j) {
-                    // Cycled all the way around; we're done
-                    break; // terminate the outer loop
+                    
+                    // Find next nonempty bucket.
+                    int j = caller.curBucket;
+                    do {
+                        boolean checker = true;
+                        j = (j + 1) % numBuckets;
+                        for (ThreadData d : threadData) {
+                            if (d.buckets.get(j).size() != 0) {
+                                checker = false;
+                                break;
+                            }
+                        }
+                        if (!checker) break;
+                    } while (j != curBucket/* && buckets.get(j).size() == 0*/);
+                    if (caller.curBucket == j) {
+                        // Cycled all the way around; we're done
+                        isDone = true;
+                        return; // terminate the outer loop
+                    }
+                    caller.curBucket = j;
+                    isDone = false;
+                    return;
                 }
-                curBucket = j;
+                private Runnable init(DeltaStep caller) {
+                    this.caller = caller;
+                    return this;
+                }
+                
+            }.init(this));
+            
+            ArrayList<Thread> threads = new ArrayList<Thread>(numThreads);
+            for (int i = 0; i < numThreads; i++) {
+                Thread t = new Thread(new Worker(i, numVertices, numThreads, threadData[i]));
+                threads.add(i, t);
+                t.start();
             }
             
+        
+            System.out.println("waiting at final barrier");
+            for (Thread t : threads) {
+                try {
+                    t.join();
+                } catch (InterruptedException e) {}
+            }
+            System.out.println("finished!");
+            long t2 = System.nanoTime();
+            System.out.println("nanotime: " + (t2-t1)/1000/1000);
         }
     
     }
